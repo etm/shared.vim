@@ -1,0 +1,292 @@
+# Pure-Ruby core shared by the server, the Vim client and the self-test.
+#
+# A document is held as lines, exactly doc.split("\n", -1): a document ending
+# in "\n" has a final "" element. An operation (op) covers the whole document
+# and is an Array of:
+#   Integer > 0  retain that many chars
+#   Integer < 0  delete that many chars
+#   String       insert it
+# Positions are characters, not bytes; "\n" counts as one.
+
+module SharedVimCore
+  module OT
+    module_function
+
+    def push(op, c)
+      return op if c == 0 || c == ''
+      last = op[-1]
+      if c.is_a?(String)
+        last.is_a?(String) ? op[-1] = last + c : op << c
+      elsif c > 0
+        last.is_a?(Integer) && last > 0 ? op[-1] += c : op << c
+      else
+        last.is_a?(Integer) && last < 0 ? op[-1] += c : op << c
+      end
+      op
+    end
+
+    # Returns [a', b'] with a then b' == b then a'. On equal positions the
+    # insert of a goes first.
+    # undo: a is an undo entry; its inserts into text that b deleted on both
+    # sides (or at the document's start/end) are dropped, b' deletes them.
+    def transform(a, b, undo: false)
+      a1 = []
+      b1 = []
+      ia = ib = 0
+      ca = a[0]
+      cb = b[0]
+      before = :start  # what b did to the char before the current position
+      until ca.nil? && cb.nil?
+        if ca.is_a?(String)
+          after = cb.nil? ? :end : cb.is_a?(String) ? :ins : cb < 0 ? :del : :keep
+          if undo && before != :keep && %i[end del].include?(after) && (before == :del || after == :del)
+            push(b1, -ca.length)
+          else
+            push(a1, ca); push(b1, ca.length)
+          end
+          ca = a[ia += 1]
+          next
+        end
+        if cb.is_a?(String)
+          push(a1, cb.length); push(b1, cb)
+          cb = b[ib += 1]
+          before = :keep
+          next
+        end
+        raise ArgumentError, 'transform: ops of different length' if ca.nil? || cb.nil?
+        m = [ca.abs, cb.abs].min
+        if ca > 0 && cb > 0 then push(a1, m); push(b1, m)
+        elsif ca < 0 && cb > 0 then push(a1, -m)
+        elsif ca > 0 && cb < 0 then push(b1, -m)
+        end
+        before = cb < 0 ? :del : :keep
+        ca = ca > 0 ? ca - m : ca + m
+        ca = a[ia += 1] if ca == 0
+        cb = cb > 0 ? cb - m : cb + m
+        cb = b[ib += 1] if cb == 0
+      end
+      [a1, b1]
+    end
+
+    # Where char index idx of the old document ends up after op.
+    def xform_index(op, idx)
+      pos = 0
+      res = idx
+      op.each do |c|
+        break if pos > idx
+        if c.is_a?(String) then res += c.length
+        elsif c > 0 then pos += c
+        else res -= [-c, idx - pos].min; pos -= c
+        end
+      end
+      res
+    end
+
+    def noop?(op) = op.all? { |c| c.is_a?(Integer) && c > 0 }
+
+    # Char position of the first change.
+    def first_change(op) = op[0].is_a?(Integer) && op[0] > 0 ? op[0] : 0
+  end
+
+  # Changed line region: model lines [lo, lo + old) became [lo, lo + new).
+  module Region
+    module_function
+
+    # r2 applies after r1.
+    def merge(r1, r2)
+      return r2 unless r1
+      return r1 unless r2
+      lo = [r1[0], r2[0]].min
+      hi = [r1[0] + r1[2], r2[0] + r2[1]].max
+      [lo, hi - lo - r1[2] + r1[1], hi - lo - r2[1] + r2[2]]
+    end
+  end
+
+  # Lines plus, per line, the author slot of each char (nil = saved text).
+  class Text
+    attr_reader :lines, :authors, :length
+
+    def initialize(lines, authors = nil)
+      @lines = lines.empty? ? [''] : lines
+      @authors = authors || @lines.map { |l| [nil] * l.length }
+      @lens = @lines.map(&:length)  # summing Integers is fast, see offset
+      @length = @lens.sum + @lines.size - 1
+    end
+
+    def offset(line) = @lens[0, line].sum + line
+
+    # [line index, column] of char position pos (binary search).
+    def locate(pos)
+      raise ArgumentError, "position #{pos} beyond end (#{@length})" if pos > @length
+      lo = 0
+      hi = @lines.size - 1
+      while lo < hi
+        mid = (lo + hi) / 2
+        if offset(mid) + @lens[mid] >= pos then hi = mid
+        else lo = mid + 1
+        end
+      end
+      [lo, pos - offset(lo)]
+    end
+
+    # Replace del chars at pos by ins. Returns [region, deleted text].
+    def splice(pos, del, ins, slot)
+      l1, c1 = locate(pos)
+      l2, = locate(pos + del)
+      seg = @lines[l1..l2].join("\n")
+      aseg = @authors[l1..l2].each_with_index.flat_map { |a, i| i == 0 ? a : [nil] + a }
+      deleted = seg[c1, del]
+      nseg = seg[0, c1] + ins + seg[(c1 + del)..]
+      naseg = aseg[0, c1] + [slot] * ins.length + aseg[(c1 + del)..]
+      nlines = nseg.empty? ? [''] : nseg.split("\n", -1)
+      i = 0
+      nauth = nlines.map { |l| a = naseg[i, l.length]; i += l.length + 1; a }
+      @lines[l1..l2] = nlines
+      @authors[l1..l2] = nauth
+      @lens[l1..l2] = nlines.map(&:length)
+      @length += ins.length - del
+      [[l1, l2 - l1 + 1, nlines.size], deleted]
+    end
+
+    # Apply op, new text by slot. Returns [inverse op, changed line region].
+    def apply(op, slot)
+      total = op.sum { |c| c.is_a?(String) ? 0 : c.abs }
+      raise ArgumentError, "op covers #{total} chars, text has #{@length}" unless total == @length
+      pos = 0
+      inv = []
+      region = nil
+      op.each do |c|
+        if c.is_a?(String)
+          r, = splice(pos, 0, c, slot)
+          region = Region.merge(region, r)
+          OT.push(inv, -c.length)
+          pos += c.length
+        elsif c > 0
+          OT.push(inv, c)
+          pos += c
+        else
+          r, deleted = splice(pos, -c, '', slot)
+          region = Region.merge(region, r)
+          OT.push(inv, deleted)
+        end
+      end
+      [inv, region]
+    end
+
+    # Op replacing lines [a, e) by nl, trimmed to the changed chars; nil if
+    # equal. A line must follow e (the final "" always does).
+    def replace_op(a, e, nl)
+      raise ArgumentError, "lines #{a}...#{e} out of range" unless a <= e && e < @lines.size
+      off = offset(a)
+      oc = @lines[a...e].map { |l| l + "\n" }.join.chars
+      nc = nl.map { |l| l + "\n" }.join.chars
+      p = 0
+      p += 1 while p < oc.size && p < nc.size && oc[p] == nc[p]
+      q = 0
+      q += 1 while q < oc.size - p && q < nc.size - p && oc[-1 - q] == nc[-1 - q]
+      return nil if p == oc.size && p == nc.size
+      del = oc.size - p - q
+      op = []
+      OT.push(op, off + p)
+      OT.push(op, -del)
+      OT.push(op, nc[p, nc.size - p - q].join)
+      OT.push(op, @length - off - p - del)
+    end
+
+    # Vim always shows a final newline; keep the model ending in one.
+    def normalize_op = @lines.last == '' && @lines.size > 1 ? nil : OT.push([@length], "\n")
+
+    def runs = @authors.map { |a| a.chunk_while { |x, y| x == y }.map { |r| [r[0], r.size] } }
+    def self.unruns(runs) = runs.map { |l| l.flat_map { |s, n| [s] * n } }
+  end
+
+  # Client side of one shared document: one op in flight, the rest queued.
+  # undo/redo: [key, ops] groups, newest first. All their ops form one
+  # sequence starting at the current text, so every op that is not recorded
+  # (remote ops, normalizations) is transformed through them.
+  class Doc
+    attr_reader :text, :rev, :pending, :slot, :undo, :redo
+
+    def initialize(text, rev, slot)
+      @text = text
+      @rev = rev
+      @slot = slot
+      @pending = []
+      @undo = []
+      @redo = []
+      @groups = 0
+    end
+
+    # Own op. Returns [inverse, region].
+    def local(op)
+      res = @text.apply(op, @slot)
+      @pending << op
+      res
+    end
+
+    # Own op; recorded for undo under key (an undo group), else not undoable.
+    # Returns the region, nil for a no-op.
+    def own(op, key = nil)
+      return nil if op.nil? || OT.noop?(op)
+      inv, region = local(op)
+      if key
+        if @undo[0] && @undo[0][0] == key then @undo[0][1].unshift(inv)
+        else @undo.unshift([key, [inv]])
+        end
+        @redo.clear
+      else
+        move_stacks(op)
+      end
+      region
+    end
+
+    # Undo (or redo) the newest group, skipping groups that others emptied.
+    # Returns [[op, region, line count before]... or nil, skipped count].
+    def undo!(forward = false)
+      from, to = forward ? [@redo, @undo] : [@undo, @redo]
+      skipped = 0
+      while (entry = from.shift)
+        ops = entry[1].reject { |e| OT.noop?(e) }
+        if ops.empty?
+          skipped += 1
+          next
+        end
+        group = []
+        done = ops.map do |e|
+          size = @text.lines.size
+          inv, region = local(e)
+          group.unshift(inv)
+          [e, region, size]
+        end
+        to.unshift([:"g#{@groups += 1}", group])
+        return [done, skipped]
+      end
+      [nil, skipped]
+    end
+
+    def move_stacks(op)
+      [@undo, @redo].each do |stack|
+        stack.map! { |key, ops| [key, ops.map { |e| e1, op = OT.transform(e, op, undo: true); e1 }] }
+      end
+    end
+
+    # Server applied our op in flight. Returns the next op to send, or nil.
+    def ack
+      @pending.shift
+      @rev += 1
+      @pending.first
+    end
+
+    # Resend: the ops we missed arrived before the nack and transformed it.
+    def nack = @pending.first
+
+    # Op of somebody else. Returns [op transformed for our text, region].
+    def remote(op, slot)
+      @pending.map! { |p| p1, op = OT.transform(p, op); p1 }
+      @rev += 1
+      _, region = @text.apply(op, slot)
+      move_stacks(op)
+      [op, region]
+    end
+  end
+end

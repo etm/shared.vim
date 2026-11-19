@@ -1,0 +1,130 @@
+#!/usr/bin/env ruby
+# shared.vim server: one process for all users, on a Unix domain socket.
+# Usage: shared-vim-server.rb [socket]   (default /tmp/shared-vim/sock)
+# Protocol: one JSON object per line, see README.md.
+# Ops not based on the current revision are rejected (nack); the client
+# transforms and resends them.
+
+require 'socket'
+require 'json'
+require_relative '../ruby/shared_vim_core'
+
+Text = SharedVimCore::Text
+SOCK = ARGV[0] || '/tmp/shared-vim/sock'
+DIR = File.dirname(SOCK)
+
+begin
+  Dir.mkdir(DIR)
+  File.chmod(01777, DIR)
+rescue SystemCallError
+end
+lock = File.open(File.join(DIR, 'lock'), File::RDWR | File::CREAT, 0666)
+File.chmod(0666, lock.path) rescue nil
+exit 0 unless lock.flock(File::LOCK_EX | File::LOCK_NB)  # another server runs
+begin
+  $stderr.reopen(File.join(DIR, "server-#{Process.uid}.log"), 'a')
+  $stderr.sync = true
+rescue SystemCallError
+end
+
+File.unlink(SOCK) if File.socket?(SOCK)
+SERVER = UNIXServer.new(SOCK)
+File.chmod(0666, SOCK)
+
+Member = Struct.new(:io, :user, :num, :slot) do
+  def name = "#{user}#{num}"
+end
+Doc = Struct.new(:text, :rev, :members)
+
+DOCS = {}   # path => Doc
+INBUF = {}  # io => String (binary)
+
+def log(msg) = $stderr.puts("#{Time.now.strftime('%F %T')} #{msg}")
+
+def out(io, h)
+  io.write(JSON.generate(h) + "\n")
+rescue SystemCallError, IOError
+end
+
+def peers(path)
+  d = DOCS[path] or return
+  list = d.members.map { |m| [m.name, m.slot] }
+  d.members.each { |m| out(m.io, t: 'peers', path: path, peers: list) }
+end
+
+def leave(io, path)
+  d = DOCS[path] or return
+  d.members.reject! { |m| m.io == io }
+  if d.members.empty? then DOCS.delete(path)
+  else peers(path)
+  end
+end
+
+def handle(io, m)
+  path = m['path']
+  d = DOCS[path]
+  me = d&.members&.find { |x| x.io == io }
+  case m['t']
+  when 'join'
+    return if me
+    created = d.nil?
+    d = DOCS[path] ||= Doc.new(Text.new(m['lines']), 0, [])
+    slots = d.members.map(&:slot)
+    nums = d.members.select { |x| x.user == m['user'] }.map(&:num)
+    me = Member.new(io, m['user'], (1..).find { |n| !nums.include?(n) }, (0..).find { |s| !slots.include?(s) })
+    d.members << me
+    out(io, t: 'joined', path: path, name: me.name, slot: me.slot, rev: d.rev,
+            lines: d.text.lines, authors: d.text.runs, created: created)
+    peers(path)
+  when 'op'
+    return unless me
+    return out(io, t: 'nack', path: path) unless m['rev'] == d.rev
+    d.text.apply(m['op'], me.slot)
+    d.rev += 1
+    d.members.each do |x|
+      if x.io == io then out(io, t: 'ack', path: path)
+      else out(x.io, t: 'op', path: path, op: m['op'], slot: me.slot)
+      end
+    end
+  when 'saved'
+    return unless me
+    d.text.authors.each { |a| a.fill(nil) }
+    d.members.each { |x| out(x.io, t: 'saved', path: path) unless x.io == io }
+  when 'leave'
+    leave(io, path) if me
+  end
+end
+
+def drop(io)
+  DOCS.keys.each { |p| leave(io, p) }
+  INBUF.delete(io)
+  io.close rescue nil
+end
+
+log "listening on #{SOCK}"
+loop do
+  ready, = IO.select([SERVER, *INBUF.keys])
+  ready.each do |io|
+    if io == SERVER
+      c = SERVER.accept_nonblock(exception: false)
+      INBUF[c] = ''.b if c.is_a?(UNIXSocket)
+      next
+    end
+    begin
+      INBUF[io] << io.read_nonblock(1 << 16)
+    rescue IO::WaitReadable
+      next
+    rescue EOFError, IOError, SystemCallError
+      drop(io)
+      next
+    end
+    while (i = INBUF[io]&.index("\n"))
+      line = INBUF[io].slice!(0..i).force_encoding('UTF-8')
+      begin
+        handle(io, JSON.parse(line))
+      rescue StandardError => e
+        log "#{e.class}: #{e.message} on #{line[0, 200]}"
+      end
+    end
+  end
+end
