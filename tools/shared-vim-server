@@ -1,13 +1,13 @@
 #!/usr/bin/env ruby
 # shared.vim server: one process for all users, on a Unix domain socket.
-# Usage: shared-vim-server.rb [socket]   (default /tmp/shared-vim/sock)
+# Usage: shared-vim-server [socket]   (default /tmp/shared-vim/sock)
 # Protocol: one JSON object per line, see README.md.
 # Ops not based on the current revision are rejected (nack); the client
-# transforms and resends them.
+# transforms and resends them. Exits after IDLE seconds without connections.
 
 require 'socket'
 require 'json'
-require_relative '../ruby/shared_vim_core'
+require_relative '../lib/shared_vim_core'
 
 Text = SharedVimCore::Text
 SOCK = ARGV[0] || '/tmp/shared-vim/sock'
@@ -36,6 +36,7 @@ Member = Struct.new(:io, :user, :num, :slot) do
 end
 Doc = Struct.new(:text, :rev, :members)
 
+IDLE = 60   # seconds without any connection before the server exits
 DOCS = {}   # path => Doc
 INBUF = {}  # io => String (binary)
 
@@ -74,7 +75,7 @@ def handle(io, m)
     me = Member.new(io, m['user'], (1..).find { |n| !nums.include?(n) }, (0..).find { |s| !slots.include?(s) })
     d.members << me
     out(io, t: 'joined', path: path, name: me.name, slot: me.slot, rev: d.rev,
-            lines: d.text.lines, authors: d.text.runs, created: created)
+            lines: d.text.lines, authors: d.text.authors, created: created)
     peers(path)
   when 'op'
     return unless me
@@ -88,7 +89,7 @@ def handle(io, m)
     end
   when 'saved'
     return unless me
-    d.text.authors.each { |a| a.fill(nil) }
+    d.text.saved!
     d.members.each { |x| out(x.io, t: 'saved', path: path) unless x.io == io }
   when 'leave'
     leave(io, path) if me
@@ -103,7 +104,13 @@ end
 
 log "listening on #{SOCK}"
 loop do
-  ready, = IO.select([SERVER, *INBUF.keys])
+  ready, = IO.select([SERVER, *INBUF.keys], nil, nil, INBUF.empty? ? IDLE : nil)
+  unless ready
+    # a Vim connecting right now sees its channel close and starts a new server
+    File.unlink(SOCK) rescue nil
+    log 'idle, exiting'
+    exit
+  end
   ready.each do |io|
     if io == SERVER
       c = SERVER.accept_nonblock(exception: false)

@@ -3,7 +3,7 @@
 # Local changes come from listener_add() and are replayed onto the model;
 # remote ops are patched into the changed lines, hidden from the listener.
 require 'json'
-require File.join(VIM.evaluate('g:shared_vim_root'), 'ruby', 'shared_vim_core')
+require File.join(VIM.evaluate('g:shared_vim_root'), 'lib', 'shared_vim_core')
 
 module SharedVim
   Core = SharedVimCore
@@ -136,7 +136,7 @@ module SharedVim
     # --- internals ----------------------------------------------------------
 
     def joined(s, m)
-      text = Core::Text.new(m['lines'], Core::Text.unruns(m['authors']))
+      text = Core::Text.new(m['lines'], m['authors'])
       s.doc = Core::Doc.new(text, m['rev'], m['slot'])
       s.name = m['name']
       if m['created'] then resync(s)  # typing between join and reply
@@ -248,19 +248,15 @@ module SharedVim
       cmd("call prop_remove({'bufnr': #{s.nr}, 'types': #{vl(TYPES)}, 'all': 1}, #{first}, #{last})")
       items = Hash.new { |h, k| h[k] = [] }
       (first..last).each do |ln|
-        a = t.authors[ln - 1]
-        col = 1
-        prev = nil
-        start = 1
-        t.lines[ln - 1].each_char.with_index do |ch, i|
-          if a[i] != prev
-            items[prev % 8] << [ln, start, ln, col] if prev
-            prev = a[i]
-            start = col
-          end
-          col += ch.bytesize
+        line = t.lines[ln - 1]
+        col = 1  # byte column
+        i = 0
+        t.authors[ln - 1].each do |slot, n|
+          b = line[i, n].bytesize
+          items[slot % 8] << [ln, col, ln, col + b] if slot
+          col += b
+          i += n
         end
-        items[prev % 8] << [ln, start, ln, col] if prev
       end
       items.each do |k, v|
         cmd("call prop_add_list({'bufnr': #{s.nr}, 'type': '#{TYPES[k]}'}, #{v})")
@@ -268,7 +264,7 @@ module SharedVim
     end
 
     def clear(s)
-      s.doc.text.authors.each { |a| a.fill(nil) }
+      s.doc.text.saved!
       cmd("call prop_remove({'bufnr': #{s.nr}, 'types': #{vl(TYPES)}, 'all': 1})")
       cmd("call setbufvar(#{s.nr}, '&modified', 0)")
     end

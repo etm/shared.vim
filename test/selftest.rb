@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # Random self-test of the core. Run: ruby test/selftest.rb
-require_relative '../ruby/shared_vim_core'
+require_relative '../lib/shared_vim_core'
 include SharedVimCore
 
 ALPHA = %w[a b ä € x] + ["\n"]
@@ -36,9 +36,36 @@ end
   inv, = t.apply(op, 7)
   raise "replace #{before.inspect} #{a}...#{e} #{nl.inspect}: #{doc(t).inspect}" unless doc(t) == expect
   raise 'length' unless t.length == expect.length
-  raise 'authors shape' unless t.authors.map(&:size) == t.lines.map(&:length)
+  raise 'authors shape' unless t.authors.zip(t.lines).all? { |a, l| a.sum { |_, n| n } <= l.length && Text.compact(a) == a }
   t.apply(inv, nil)
   raise "inverse: #{doc(t).inspect} != #{before.inspect}" unless doc(t) == before && t.authors == authors
+end
+
+# 1b. author runs match a per-char reference ("\n" has no author)
+def flat(t)
+  t.lines.each_with_index.flat_map do |l, i|
+    a = t.authors[i].flat_map { |s, n| [s] * n }
+    a += [nil] * (l.length - a.size)
+    i == 0 ? a : [nil] + a
+  end
+end
+1000.times do
+  t = Text.new(rnd_lines(rand(0..5)) + [''])
+  ref = flat(t)
+  20.times do
+    op = rnd_edit(t) or next
+    slot = [nil, 0, 1, 2].sample
+    pos = 0
+    op.each do |c|
+      if c.is_a?(String) then ref[pos, 0] = [slot] * c.length; pos += c.length
+      elsif c > 0 then pos += c
+      else ref[pos, -c] = []
+      end
+    end
+    t.apply(op, slot)
+    doc(t).each_char.with_index { |ch, i| ref[i] = nil if ch == "\n" }
+    raise "runs: #{t.authors.inspect} vs #{ref.inspect}" unless flat(t) == ref && t.authors.all? { |a| Text.compact(a) == a }
+  end
 end
 
 # Simulation: server rejects ops based on an old revision.
@@ -110,7 +137,7 @@ end
     d.own(rnd_edit(d.text, insert_only: i == 0), "k#{rand(1000)}")
   end
   clients.each { |c| raise "undo round #{round}: diverged" unless doc(c.text) == doc(server) }
-  raise "undo round #{round}: client 0 text left" if server.authors.flatten.include?(0)
+  raise "undo round #{round}: client 0 text left" if server.authors.any? { |a| a.any? { |s, _| s == 0 } }
 end
 
 # 3b. same with mixed edits: still converges

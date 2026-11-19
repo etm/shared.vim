@@ -102,13 +102,17 @@ module SharedVimCore
     end
   end
 
-  # Lines plus, per line, the author slot of each char (nil = saved text).
+  # Lines plus, per line, the authors as runs [[slot, count], ...] (slot nil =
+  # saved text). Runs are compact: no empty runs, equal neighbours merged, no
+  # trailing nil run; chars past the last run are saved text.
   class Text
     attr_reader :lines, :authors, :length
 
+    EMPTY = [].freeze
+
     def initialize(lines, authors = nil)
       @lines = lines.empty? ? [''] : lines
-      @authors = authors || @lines.map { |l| [nil] * l.length }
+      @authors = authors ? authors.map { |a| Text.compact(a) } : Array.new(@lines.size, EMPTY)
       @lens = @lines.map(&:length)  # summing Integers is fast, see offset
       @length = @lens.sum + @lines.size - 1
     end
@@ -134,13 +138,23 @@ module SharedVimCore
       l1, c1 = locate(pos)
       l2, = locate(pos + del)
       seg = @lines[l1..l2].join("\n")
-      aseg = @authors[l1..l2].each_with_index.flat_map { |a, i| i == 0 ? a : [nil] + a }
+      q = []  # runs of seg, padded to full length; "\n" is always nil
+      (l1..l2).each do |l|
+        q << [nil, 1] if l > l1
+        q.concat(@authors[l].map(&:dup))
+        rest = @lens[l] - @authors[l].sum { |_, n| n }
+        q << [nil, rest] if rest > 0
+      end
       deleted = seg[c1, del]
       nseg = seg[0, c1] + ins + seg[(c1 + del)..]
-      naseg = aseg[0, c1] + [slot] * ins.length + aseg[(c1 + del)..]
+      head = Text.take(q, c1)
+      Text.take(q, del)
+      q = head + [[slot, ins.length]] + q
       nlines = nseg.empty? ? [''] : nseg.split("\n", -1)
-      i = 0
-      nauth = nlines.map { |l| a = naseg[i, l.length]; i += l.length + 1; a }
+      nauth = nlines.each_with_index.map do |l, i|
+        Text.take(q, 1) if i > 0
+        Text.compact(Text.take(q, l.length))
+      end
       @lines[l1..l2] = nlines
       @authors[l1..l2] = nauth
       @lens[l1..l2] = nlines.map(&:length)
@@ -196,8 +210,33 @@ module SharedVimCore
     # Vim always shows a final newline; keep the model ending in one.
     def normalize_op = @lines.last == '' && @lines.size > 1 ? nil : OT.push([@length], "\n")
 
-    def runs = @authors.map { |a| a.chunk_while { |x, y| x == y }.map { |r| [r[0], r.size] } }
-    def self.unruns(runs) = runs.map { |l| l.flat_map { |s, n| [s] * n } }
+    # Everything written: no unsaved authors left.
+    def saved! = @authors.fill(EMPTY)
+
+    # Remove the first n chars from runs q (modified in place), return them.
+    def self.take(q, n)
+      out = []
+      while n > 0 && (r = q.first)
+        k = [r[1], n].min
+        out << [r[0], k]
+        n -= k
+        r[1] -= k
+        q.shift if r[1] == 0
+      end
+      out
+    end
+
+    def self.compact(runs)
+      out = []
+      runs.each do |s, n|
+        next if n == 0
+        if out.last && out.last[0] == s then out[-1] = [s, out.last[1] + n]
+        else out << [s, n]
+        end
+      end
+      out.pop if out.last && out.last[0].nil?
+      out.empty? ? EMPTY : out
+    end
   end
 
   # Client side of one shared document: one op in flight, the rest queued.

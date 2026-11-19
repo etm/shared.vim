@@ -1,0 +1,30 @@
+#!/usr/bin/env ruby
+# Installs a stub plugin into Vim's package directory. The stub finds the
+# newest installed shared.vim gem through RubyGems at each Vim start, so gem
+# updates need no reinstall.
+# Usage: shared-vim-install [vim dir]   (default ~/.vim)
+
+require 'fileutils'
+
+MARK = '" shared.vim stub, written by shared-vim-install'
+STUB = <<~VIM
+  #{MARK}: loads the plugin from the
+  " newest installed shared.vim gem.
+  if has('ruby')
+    ruby VIM.command('source ' + File.join(Gem::Specification.find_by_name('shared.vim').gem_dir, 'plugin', 'shared.vim').gsub(' ', '\\ ')) rescue nil
+  endif
+VIM
+
+root = File.expand_path('..', __dir__)
+unless Gem::Specification.any? { |s| s.name == 'shared.vim' && s.gem_dir == root }
+  puts 'Not an installed gem. To use this checkout, add to your vimrc:', '', "  set rtp+=#{root}"
+  exit
+end
+
+file = File.join(File.expand_path(ARGV[0] || '~/.vim'), 'pack', 'shared', 'start', 'shared.vim', 'plugin', 'shared.vim')
+if File.exist?(file) && !File.read(file).start_with?(MARK)
+  abort "#{file} exists and was not written by shared-vim-install, leaving it alone."
+end
+FileUtils.mkdir_p(File.dirname(file))
+File.write(file, STUB)
+puts "Installed #{file}", 'Nothing to add to your vimrc. To uninstall, delete that file.'

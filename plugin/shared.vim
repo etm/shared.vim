@@ -6,9 +6,9 @@ let g:loaded_shared_vim = 1
 
 let g:shared_vim_root = expand('<sfile>:p:h:h')
 let s:sock = get(g:, 'shared_vim_socket', '/tmp/shared-vim/sock')
-let s:server = g:shared_vim_root . '/server/shared-vim-server.rb'
+let s:server = g:shared_vim_root . '/tools/shared-vim-server'
 let g:shared_vim_ch = v:none
-execute 'rubyfile ' . fnameescape(g:shared_vim_root . '/ruby/shared_vim.rb')
+execute 'rubyfile ' . fnameescape(g:shared_vim_root . '/lib/shared_vim.rb')
 
 let s:colors = [[203, '#ff5f5f'], [75, '#5fafff'], [114, '#87d787'], [215, '#ffaf5f'],
       \ [177, '#d787ff'], [80, '#5fd7d7'], [221, '#ffd75f'], [211, '#ff87af']]
@@ -25,7 +25,7 @@ function! s:Colors() abort
   endfor
 endfunction
 
-" Connect; start the server detached (it outlives this Vim) if needed.
+" Connect; start the server detached (it may outlive this Vim) if needed.
 function! s:Connect() abort
   if type(g:shared_vim_ch) == v:t_channel && ch_status(g:shared_vim_ch) ==# 'open'
     return 1
