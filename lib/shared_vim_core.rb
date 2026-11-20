@@ -259,7 +259,8 @@ module SharedVimCore
   # sequence starting at the current text, so every op that is not recorded
   # (remote ops, normalizations) is transformed through them.
   class Doc
-    attr_reader :text, :rev, :pending, :slot, :undo, :redo
+    attr_reader :text, :rev, :pending, :slot, :undo, :redo, :cursors
+    attr_accessor :mine  # own cursor position, nil until known
 
     def initialize(text, rev, slot)
       @text = text
@@ -269,14 +270,26 @@ module SharedVimCore
       @undo = []
       @redo = []
       @groups = 0
+      # Cursors of others, slot => char position in the server's text. They
+      # move with the ops in the server's order, exactly as on the server:
+      # other orders can end differently (an insert at a collapsed delete).
+      @cursors = {}
     end
 
     # Own op. Returns [inverse, region].
     def local(op)
       res = @text.apply(op, @slot)
       @pending << op
+      @mine = OT.xform_index(op, @mine) if @mine
       res
     end
+
+    def cursor(slot, pos) = @cursors[slot] = pos
+
+    # Cursors of others in our text, i.e. after our pending ops.
+    def shown_cursors = @cursors.transform_values { |p| @pending.reduce(p) { |q, op| OT.xform_index(op, q) } }
+
+    def move_cursors(op) = @cursors.transform_values! { |p| OT.xform_index(op, p) }
 
     # Own op; recorded for undo under key (an undo group), else not undoable.
     # Returns the region, nil for a no-op.
@@ -326,7 +339,7 @@ module SharedVimCore
 
     # Server applied our op in flight. Returns the next op to send, or nil.
     def ack
-      @pending.shift
+      move_cursors(@pending.shift)
       @rev += 1
       @pending.first
     end
@@ -336,9 +349,11 @@ module SharedVimCore
 
     # Op of somebody else. Returns [op transformed for our text, region].
     def remote(op, slot)
+      move_cursors(op)
       @pending.map! { |p| p1, op = OT.transform(p, op); p1 }
       @rev += 1
       _, region = @text.apply(op, slot)
+      @mine = OT.xform_index(op, @mine) if @mine
       move_stacks(op)
       [op, region]
     end

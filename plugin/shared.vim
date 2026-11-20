@@ -37,6 +37,10 @@ function! s:Colors() abort
     if empty(prop_type_get('shared_slot' . i))
       call prop_type_add('shared_slot' . i, {'highlight': 'SharedSlot' . i, 'priority': 1000})
     endif
+    " cursors of others: colored like their name, above the text colors
+    if empty(prop_type_get('shared_cursor' . i))
+      call prop_type_add('shared_cursor' . i, {'highlight': 'SharedStat' . i, 'priority': 1010})
+    endif
   endfor
 endfunction
 
@@ -58,12 +62,54 @@ function! s:Connect() abort
       endtry
     endif
     if i == 0 || i == 20
-      call job_start(['setsid', '-f', 'ruby', s:server, s:sock],
-            \ {'stoponexit': '', 'in_io': 'null', 'out_io': 'null', 'err_io': 'null'})
+      call s:StartServer()
     endif
     sleep 50m
   endfor
   return 0
+endfunction
+
+" From a gem, the server of the newest installed version.
+function! s:StartServer() abort
+  let server = s:server
+  ruby SharedVim.safely { f = SharedVim.newest_server; VIM.command("let server = #{SharedVim.vs(f)}") if f }
+  call job_start(['setsid', '-f', 'ruby', server, s:sock],
+        \ {'stoponexit': '', 'in_io': 'null', 'out_io': 'null', 'err_io': 'null'})
+endfunction
+
+" :SharedRestart: stop the server for everybody and start it again, e.g.
+" after installing a new version. This Vim starts it as soon as the old one
+" is gone, before the others reconnect (0.5 s) and might start an older one.
+function! SharedVimRestart() abort
+  if type(g:shared_vim_ch) == v:t_channel && ch_status(g:shared_vim_ch) ==# 'open'
+    call ch_sendraw(g:shared_vim_ch, json_encode({'t': 'shutdown'}) . "\n")
+    for i in range(40)
+      if getftype(s:sock) !=# 'socket'
+        break
+      endif
+      sleep 25m
+    endfor
+  endif
+  call s:StartServer()
+endfunction
+
+" :SharedReset: everybody back to the file on disk.
+function! SharedVimReset() abort
+  let b = bufnr()
+  if !get(b:, 'shared_vim_on', 0)
+    echo 'shared.vim: this buffer is not shared'
+    return
+  endif
+  let pos = getcurpos()
+  ruby SharedVim.safely { SharedVim.reset_start(VIM.evaluate('l:b')) }
+  let s:reloading = b
+  try
+    silent edit!
+  finally
+    let s:reloading = 0
+    ruby SharedVim.safely { SharedVim.reset_end(VIM.evaluate('l:b')) }
+  endtry
+  call setpos('.', pos)
 endfunction
 
 function! SharedVimJoin(b) abort
@@ -106,6 +152,30 @@ function! s:Rejoin() abort
   for b in range(1, bufnr('$'))
     call SharedVimJoin(b)
   endfor
+endfunction
+
+" Cursor moves are sent at most every 50 ms.
+let s:cursor_timer = 0
+function! s:CursorMoved() abort
+  if get(b:, 'shared_vim_on', 0) && !s:cursor_timer
+    let s:cursor_timer = timer_start(50, {-> s:SendCursor()})
+  endif
+endfunction
+
+function! s:SendCursor() abort
+  let s:cursor_timer = 0
+  ruby SharedVim.safely { SharedVim.cursor(VIM.evaluate('bufnr()')) }
+endfunction
+
+" :SharedJump [name]: to the cursor of name, or to the next one in the text.
+function! SharedVimJump(name) abort
+  ruby SharedVim.safely { SharedVim.jump(VIM.evaluate('bufnr()'), VIM.evaluate('a:name')) }
+endfunction
+
+function! SharedVimNames(lead, line, pos) abort
+  let names = []
+  ruby SharedVim.safely { VIM.command('let names = ' + SharedVim.vl(SharedVim.others(VIM.evaluate('bufnr()')).map(&:first))) }
+  return filter(names, {_, n -> stridx(n, a:lead) == 0})
 endfunction
 
 function! SharedVimStatus() abort
@@ -190,7 +260,11 @@ if &statusline ==# ''
 endif
 let &statusline = '%{%SharedVimStatus()%} ' . &statusline
 
-nnoremap <expr> u     get(b:, 'shared_vim_on', 0) ? printf("\<Cmd>call SharedVimUndo(%d, 0)\<CR>", v:count1) : 'u'
+command! -nargs=? -complete=customlist,SharedVimNames SharedJump call SharedVimJump(<q-args>)
+command! -nargs=0 SharedRestart call SharedVimRestart()
+command! -nargs=0 SharedReset call SharedVimReset()
+
+nnoremap <expr> u    get(b:, 'shared_vim_on', 0) ? printf("\<Cmd>call SharedVimUndo(%d, 0)\<CR>", v:count1) : 'u'
 nnoremap <expr> <C-r> get(b:, 'shared_vim_on', 0) ? printf("\<Cmd>call SharedVimUndo(%d, 1)\<CR>", v:count1) : "\<C-r>"
 
 augroup shared_vim
@@ -201,6 +275,7 @@ augroup shared_vim
   autocmd BufWritePost * ruby SharedVim.safely { SharedVim.saved(VIM.evaluate("expand('<abuf>')").to_i) }
   autocmd BufUnload * call s:Leave(str2nr(expand('<abuf>')))
   autocmd ColorScheme * call s:Colors()
+  autocmd CursorMoved,CursorMovedI,BufEnter * call s:CursorMoved()
   autocmd SwapExists * call s:SwapExists()
   autocmd FileChangedShell * call s:FileChanged()
   autocmd FileChangedShellPost * call s:FileChangedPost()

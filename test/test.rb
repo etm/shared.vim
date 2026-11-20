@@ -83,14 +83,22 @@ end
   end
 end
 
-# Simulation: server rejects ops based on an old revision.
+# Simulation: server rejects ops based on an old revision. Idle clients also
+# send cursor positions; spos are the server's (slot => pos).
 def simulate(rounds, start, undo_by: nil)
   server = Text.new(start.dup)
   srev = 0
+  spos = {}
   clients = Array.new(3) { |i| Doc.new(Text.new(start.dup), 0, i) }
   up = Array.new(3) { [] }
   down = Array.new(3) { [] }
   send = ->(i) { up[i] << [clients[i].rev, clients[i].pending.first] }
+  want = [false] * 3
+  send_cursor = lambda do |i|
+    d = clients[i]
+    want[i] = !d.pending.empty?
+    up[i] << [:cursor, d.rev, d.mine] unless want[i]
+  end
   step = lambda do |allow_edits, &edit|
     i = rand(3)
     case rand(3)
@@ -98,14 +106,27 @@ def simulate(rounds, start, undo_by: nil)
       return unless allow_edits
       d = clients[i]
       idle = d.pending.empty?
+      if rand(3) == 0
+        d.mine = rand(0..d.text.length)
+        send_cursor.(i)
+        return
+      end
       edit.(i, d)
       send.(i) if idle && d.pending.any?
     when 1
       return if up[i].empty?
-      rev, op = up[i].shift
-      if rev == srev
+      rev, op, pos = up[i].shift
+      if rev == :cursor
+        if op == srev
+          spos[i] = pos
+          3.times { |j| down[j] << [:cursor, i, pos] unless j == i }
+        else
+          down[i] << [:cnack]
+        end
+      elsif rev == srev
         server.apply(op, i)
         srev += 1
+        spos.transform_values! { |p| OT.xform_index(op, p) }
         3.times { |j| down[j] << (j == i ? [:ack] : [:op, op, i]) }
       else
         down[i] << [:nack]
@@ -115,8 +136,12 @@ def simulate(rounds, start, undo_by: nil)
       m = down[i].shift
       d = clients[i]
       case m[0]
-      when :ack then send.(i) if d.ack
+      when :ack
+        send.(i) if d.ack
+        send_cursor.(i) if want[i]
       when :nack then send.(i) if d.nack
+      when :cnack then send_cursor.(i)
+      when :cursor then d.cursor(m[1], m[2])
       else d.remote(m[1], m[2])
       end
     end
@@ -131,17 +156,18 @@ def simulate(rounds, start, undo_by: nil)
     send.(undo_by) if idle && d.pending.any?
     drain.()
   end
-  [server, clients]
+  [server, clients, spos]
 end
 
 # 2. convergence of 3 clients, random message delays
 300.times do |round|
-  server, clients = simulate(60, rnd_lines(rand(0..4)) + ['']) do |_, d|
+  server, clients, spos = simulate(60, rnd_lines(rand(0..4)) + ['']) do |_, d|
     d.own(rnd_edit(d.text), rand(1000))
   end
   clients.each_with_index do |c, i|
     raise "round #{round}: client #{i} #{doc(c.text).inspect} != #{doc(server).inspect}" unless doc(c.text) == doc(server)
     raise "round #{round}: client #{i} authors differ" unless c.text.authors == server.authors
+    raise "round #{round}: client #{i} cursors #{c.cursors} != #{spos}" unless c.cursors == spos.reject { |k, _| k == i }
   end
 end
 

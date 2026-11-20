@@ -20,6 +20,15 @@ or start.
   name first.
 * Unsaved text is shown in its author's color. Any `:w` clears all colors in
   everybody's Vim, since the file now holds all the text.
+* The cursors of the others are shown in the colors of their names (at a line
+  end as a colored space). `:SharedJump bob1` jumps to one (Tab completes the
+  names), `:SharedJump` to the next one after yours in the text, so repeating
+  it visits everybody; `CTRL-O` jumps back. There is no default mapping, e.g.
+  (after any `set nocompatible`, else `<Leader>` is taken literally):
+
+  ```vim
+  nnoremap <Leader>j :SharedJump<CR>
+  ```
 * Per-user undo: `u` and `CTRL-R` (with counts) take back only your own
   changes, even after others edited around them.
 
@@ -80,6 +89,14 @@ let g:shared_vim_socket = '/other/path/sock'  " max ~100 chars
 let g:shared_vim_max_size = 10000000          " bytes; bigger files are not shared
 ```
 
+Commands:
+
+| command | |
+|---|---|
+| `:SharedJump [name]` | jump to the cursor of `name`, or to the next one after yours |
+| `:SharedReset` | everybody back to the file on disk: unsaved changes of all users are dropped, colors cleared |
+| `:SharedRestart` | stop the server for everybody and start it again, e.g. after installing a new version (from a gem: the newest installed one). All Vims rejoin; text survives, colors and undo history do not. Each Vim keeps its loaded plugin version until it is restarted. |
+
 ## Files
 
 | file | role |
@@ -114,9 +131,14 @@ Operational transformation on character positions, with a dumb server:
   so undo never revives text inside a deleted section. An undo step that
   came to nothing (someone removed that text) is skipped with a message, and
   the same keypress goes on to your previous change.
+* **Cursors:** sent as char positions, at most every 50 ms, and only while no
+  own op is pending, so they refer to the server's text at that revision (else
+  `cnack`, and the Vim resends). Server and Vims move them with every op in the
+  server's order: in any other order an insert at a cursor can end on either
+  side of it. For display, a Vim moves them on through its pending ops.
 
-Messages (`t` field): `join`/`joined`, `op`/`ack`/`nack`, `saved`, `leave`,
-`peers`.
+Messages (`t` field): `join`/`joined`, `op`/`ack`/`nack`, `cursor`/`cnack`,
+`saved`, `reset`, `leave`, `peers`, `shutdown`.
 
 Vim integration details:
 
@@ -136,7 +158,9 @@ Vim integration details:
 ## Cost
 
 Per edit, measured in Vim: 0.1 ms in a 100 KB file, 0.3–0.9 ms in a 1 MB file
-(position dependent). Joining sends the whole file once.
+(position dependent). Joining sends the whole file once. While others have the
+file open, drawing their cursors adds about 0.2 ms per change in a 1 MB file;
+a cursor move costs 0.01 ms plus one small message.
 
 Memory: the server and every Vim that has the file open each keep a model of
 it, about twice the file size (1 MB file: 2 MB, 10 MB file: 23 MB).

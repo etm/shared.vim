@@ -30,9 +30,18 @@ STUB = <<~VIM
   endif
 VIM
 
+MAPPING = <<~TXT
+
+  Optional, to jump to the cursors of the others with \\j, add to your vimrc
+  (after any "set nocompatible", else <Leader> is taken literally):
+
+    nnoremap <Leader>j :SharedJump<CR>
+TXT
+
 root = File.expand_path('..', __dir__)
 unless Gem::Specification.any? { |s| s.name == 'shared.vim' && s.gem_dir == root }
   puts 'Not an installed gem. To use this checkout, add to your vimrc:', '', "  set rtp+=#{root}"
+  puts MAPPING
   exit
 end
 
@@ -43,3 +52,4 @@ end
 FileUtils.mkdir_p(File.dirname(file))
 File.write(file, STUB)
 puts "Installed #{file}", 'Nothing to add to your vimrc. To uninstall, delete that file.'
+puts MAPPING

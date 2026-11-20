@@ -24,8 +24,11 @@ module SharedVim
   Core = SharedVimCore
   OT = Core::OT
   TYPES = (0..7).map { |i| "shared_slot#{i}" }
+  CTYPES = (0..7).map { |i| "shared_cursor#{i}" }
 
-  Buf = Struct.new(:nr, :path, :doc, :name, :peers, :listener, :ignore)
+  # want, reset: cursor / reset message due once no own op is pending;
+  # drawn: cursor props shown
+  Buf = Struct.new(:nr, :path, :doc, :name, :peers, :listener, :ignore, :want, :drawn, :reset)
 
   @bufs = {}   # bufnr => Buf
   @paths = {}  # path => bufnr
@@ -82,6 +85,81 @@ module SharedVim
         resync(s)
       end
       render(s, first, last - 1 + added)
+      render_cursors(s)
+    end
+
+    # :SharedReset, around Vim reloading the file: the difference is shared as
+    # a normal edit, then everybody's colors are cleared. The reset message
+    # must reach the server after that edit, so it waits for the last ack.
+    def reset_start(b)
+      s = @bufs[b] or return
+      return unless s.doc
+      flush(s)
+      s.ignore = true
+    end
+
+    def reset_end(b)
+      s = @bufs[b] or return
+      return unless s.doc
+      flush(s)
+      s.ignore = false
+      resync(s)
+      clear(s)
+      s.reset = true
+      send_reset(s)
+    end
+
+    def send_reset(s)
+      return unless s.reset && s.doc.pending.empty?
+      tx(t: 'reset', path: s.path)
+      s.reset = false
+    end
+
+    # Server of the newest installed gem, if this plugin runs from a gem.
+    def newest_server
+      Gem::Specification.reset  # a new version may have been installed
+      specs = Gem::Specification.find_all_by_name('shared.vim')
+      return nil unless specs.any? { |sp| sp.gem_dir == ev('g:shared_vim_root') }
+      f = File.join(specs.max_by(&:version).gem_dir, 'tools', 'shared-vim-server')
+      File.file?(f) ? f : nil
+    end
+
+    # Others with a known cursor: [[name, slot], ...].
+    def others(b)
+      s = @bufs[b] or return []
+      return [] unless s.doc
+      (s.peers || []).select { |_, slot| slot != s.doc.slot && s.doc.cursors.key?(slot) }
+    end
+
+    # Jump to the cursor of name, or without one to the next cursor after
+    # ours in the text (wrapping), so repeating it visits everybody.
+    def jump(b, name)
+      list = others(b)
+      return VIM.message('shared.vim: no other cursor here') if list.empty?
+      s = @bufs[b]
+      shown = s.doc.shown_cursors
+      if name.empty?
+        cur = cursor_offset(s) or return
+        order = list.map { |_, slot| shown[slot] }.sort
+        target = order.find { |p| p > cur } || order.first
+      else
+        slot = list.find { |n, _| n == name }&.last
+        return VIM.message("shared.vim: no cursor of #{name}") unless slot
+        target = shown[slot]
+      end
+      cmd("normal! m'")  # jumplist: CTRL-O goes back
+      set_cursor(s, target)
+    end
+
+    # Our cursor moved.
+    def cursor(b)
+      s = @bufs[b] or return
+      return unless s.doc
+      flush(s)
+      pos = cursor_offset(s) or return
+      return if pos == s.doc.mine
+      s.doc.mine = pos
+      send_cursor(s)
     end
 
     def saved(b)
@@ -127,6 +205,7 @@ module SharedVim
         quietly(s) { done.each { |_, region, size| patch(s, size, region) } }
         set_cursor(s, OT.first_change(done[0][0]))
       end
+      render_cursors(s)
       VIM.message("shared.vim: skipped #{skipped} change#{'s' if skipped > 1} removed by someone else") if skipped > 0
     end
 
@@ -136,14 +215,28 @@ module SharedVim
       s = @bufs[b]
       case m['t']
       when 'joined' then joined(s, m)
-      when 'ack' then send_op(s) if s.doc.ack
+      when 'ack'
+        send_op(s) if s.doc.ack
+        send_reset(s)
+        send_cursor(s) if s.want
       when 'nack' then send_op(s) if s.doc.nack
+      when 'cnack' then send_cursor(s) if s.doc.mine
       when 'op' then remote(s, m['op'], m['slot'])
+      when 'cursor'
+        s.doc.cursor(m['slot'], m['pos'])
+        render_cursors(s)
       when 'saved'
         clear(s)
         cmd("call setbufvar(#{b}, 'shared_vim_peer_saved', 1)")
         cmd("call SharedVimSyncTime(#{b})")
-      when 'peers' then s.peers = m['peers']
+      when 'reset' then clear(s)
+      when 'peers'
+        s.peers = m['peers']
+        if s.doc
+          slots = s.peers.map { |_, slot| slot }
+          s.doc.cursors.select! { |slot, _| slots.include?(slot) }
+          render_cursors(s)
+        end
       end
       status(s)
     end
@@ -161,15 +254,31 @@ module SharedVim
       s.listener = ev("listener_add('SharedVimListener', #{s.nr}, {'text': v:true})")
       cmd("call setbufvar(#{s.nr}, 'shared_vim_on', 1)")
       render(s, 1, text.lines.size - 1)
+      (m['cursors'] || []).each { |slot, pos| s.doc.cursor(slot, pos) }
+      render_cursors(s)
+      cursor(s.nr)
     end
 
     def unhook(s)
       cmd("call listener_remove(#{s.listener})") if s.listener
+      cmd("call prop_remove({'bufnr': #{s.nr}, 'types': #{vl(CTYPES)}, 'all': 1})") if s.drawn
       cmd("call setbufvar(#{s.nr}, 'shared_vim_on', 0)")
       cmd("call setbufvar(#{s.nr}, 'shared_vim_status', '')")
     end
 
     def send_op(s) = tx(t: 'op', path: s.path, rev: s.doc.rev, op: s.doc.pending.first)
+
+    # A position belongs to one revision. Without pending ops our text is the
+    # server's at our rev; otherwise it waits for the last ack. The server
+    # answers cnack if it is further, and the ops we lack arrive before that.
+    def send_cursor(s)
+      if s.doc.pending.empty?
+        tx(t: 'cursor', path: s.path, rev: s.doc.rev, pos: s.doc.mine)
+        s.want = false
+      else
+        s.want = true
+      end
+    end
 
     # Own op that the buffer already shows (key: undo group). Sends it.
     def own(s, op, key = nil)
@@ -186,6 +295,7 @@ module SharedVim
       region = Core::Region.merge(region, own(s, s.doc.text.normalize_op))
       quietly(s) { patch(s, old_size, region) }
       set_cursor(s, OT.xform_index(op, cur)) if cur
+      render_cursors(s)
     end
 
     def flush(s) = cmd("call listener_flush(#{s.nr})")
@@ -275,6 +385,25 @@ module SharedVim
       end
       items.each do |k, v|
         cmd("call prop_add_list({'bufnr': #{s.nr}, 'type': '#{TYPES[k]}'}, #{v})")
+      end
+    end
+
+    # Other users' cursors in the color of their name. At a line end there is
+    # no char to color, a virtual space stands in.
+    def render_cursors(s)
+      cmd("call prop_remove({'bufnr': #{s.nr}, 'types': #{vl(CTYPES)}, 'all': 1})") if s.drawn
+      t = s.doc.text
+      s.drawn = !s.doc.cursors.empty?
+      s.doc.shown_cursors.each do |slot, pos|
+        l, c = t.locate([pos, t.length].min)
+        if l > t.lines.size - 2  # after the final newline
+          l = [t.lines.size - 2, 0].max
+          c = t.lines[l].length
+        end
+        line = t.lines[l]
+        opts = "'bufnr': #{s.nr}, 'type': '#{CTYPES[slot % 8]}', " +
+               (c < line.length ? "'length': #{line[c].bytesize}" : "'text': ' '")
+        cmd("call prop_add(#{l + 1}, #{line[0, c].bytesize + 1}, {#{opts}})")
       end
     end
 

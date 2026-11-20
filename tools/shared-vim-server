@@ -25,6 +25,7 @@ require 'json'
 require_relative '../lib/shared_vim_core'
 
 Text = SharedVimCore::Text
+OT = SharedVimCore::OT
 SOCK = ARGV[0] || '/tmp/shared-vim/sock'
 DIR = File.dirname(SOCK)
 
@@ -46,7 +47,7 @@ File.unlink(SOCK) if File.socket?(SOCK)
 SERVER = UNIXServer.new(SOCK)
 File.chmod(0666, SOCK)
 
-Member = Struct.new(:io, :user, :num, :slot) do
+Member = Struct.new(:io, :user, :num, :slot, :pos) do  # pos: cursor, nil if unknown
   def name = "#{user}#{num}"
 end
 Doc = Struct.new(:text, :rev, :members)
@@ -89,23 +90,34 @@ def handle(io, m)
     nums = d.members.select { |x| x.user == m['user'] }.map(&:num)
     me = Member.new(io, m['user'], (1..).find { |n| !nums.include?(n) }, (0..).find { |s| !slots.include?(s) })
     d.members << me
+    cursors = d.members.select { |x| x.pos && x != me }.map { |x| [x.slot, x.pos] }
     out(io, t: 'joined', path: path, name: me.name, slot: me.slot, rev: d.rev,
-            lines: d.text.lines, authors: d.text.authors, created: created)
+            lines: d.text.lines, authors: d.text.authors, cursors: cursors, created: created)
     peers(path)
+  when 'cursor'
+    return unless me
+    return out(io, t: 'cnack', path: path) unless m['rev'] == d.rev
+    me.pos = m['pos'].to_i.clamp(0, d.text.length)
+    d.members.each { |x| out(x.io, t: 'cursor', path: path, slot: me.slot, pos: me.pos) unless x == me }
   when 'op'
     return unless me
     return out(io, t: 'nack', path: path) unless m['rev'] == d.rev
     d.text.apply(m['op'], me.slot)
     d.rev += 1
+    d.members.each { |x| x.pos = OT.xform_index(m['op'], x.pos) if x.pos }
     d.members.each do |x|
       if x.io == io then out(io, t: 'ack', path: path)
       else out(x.io, t: 'op', path: path, op: m['op'], slot: me.slot)
       end
     end
-  when 'saved'
+  when 'saved', 'reset'
     return unless me
     d.text.saved!
-    d.members.each { |x| out(x.io, t: 'saved', path: path) unless x.io == io }
+    d.members.each { |x| out(x.io, t: m['t'], path: path) unless x.io == io }
+  when 'shutdown'
+    log 'shutdown requested'
+    File.unlink(SOCK) rescue nil
+    exit
   when 'leave'
     leave(io, path) if me
   end
