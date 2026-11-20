@@ -6,7 +6,7 @@
 > Vimscript and how to interact with Vim internals. Anyway. Its a passion
 > project. Use at your own discretion.
 
-Automatic live co-editing for Vim on one machine. Everybody who opens the same
+Live co-editing for Vim on one machine. Everybody who opens the same
 file (same resolved path) edits one shared text; there is nothing to configure
 or start.
 
