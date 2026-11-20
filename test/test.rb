@@ -14,7 +14,7 @@
 # shared.vim (file LICENSE in the main directory). If not, see
 # <http://www.gnu.org/licenses/>.
 
-# Random self-test of the core. Run: ruby test/selftest.rb
+# Random self-test of the core. Run: rake test
 require_relative '../lib/shared_vim_core'
 include SharedVimCore
 
@@ -202,4 +202,4 @@ raise "neighbour kept: #{doc(a.text).inspect}" unless doc(a.text) == "foo bar\n"
 raise 'xform' unless OT.xform_index([2, 'XY', 3], 3) == 5
 raise 'xform' unless OT.xform_index([1, -2, 2], 2) == 1
 
-puts 'selftest ok'
+puts 'test ok'

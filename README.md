@@ -89,7 +89,7 @@ let g:shared_vim_max_size = 10000000          " bytes; bigger files are not shar
 | `lib/shared_vim_core.rb` | line model, ops, transform, client state, undo stacks |
 | `lib/shared_vim.rb` | Vim side in Ruby: listener, buffer patching, colors, status |
 | `plugin/shared.vim` | autocmds, channel, mappings, swap/timestamp handling |
-| `test/selftest.rb` | random tests incl. convergence and undo: `rake test` |
+| `test/test.rb` | random tests incl. convergence and undo: `rake test` |
 
 `rake` builds the gem into `pkg/`, `rake install` installs it.
 

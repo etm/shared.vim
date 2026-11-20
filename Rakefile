@@ -14,7 +14,7 @@ end
 task :default => :gem
 
 task :test do
-  ruby 'test/selftest.rb'
+  ruby 'test/test.rb'
 end
 
 task :push => :gem do |r|
