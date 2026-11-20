@@ -1,3 +1,18 @@
+# This file is part of shared.vim.
+#
+# shared.vim is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# shared.vim is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# shared.vim (file LICENSE in the main directory). If not, see
+# <http://www.gnu.org/licenses/>.
+
 # Vim side of shared.vim, loaded with :rubyfile from plugin/shared.vim.
 # The model of a buffer is its lines plus a final "" (the last newline).
 # Local changes come from listener_add() and are replayed onto the model;
