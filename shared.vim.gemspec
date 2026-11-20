@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name             = "shared.vim"
-  s.version          = "1.1.1"
+  s.version          = "1.1.2"
   s.platform         = Gem::Platform::RUBY
   s.license          = "GPL-3.0-or-later"
   s.summary          = "shared.vim - Live co-editing in Vim, for everybody on the same computer."
