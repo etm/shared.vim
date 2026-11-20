@@ -1,0 +1,29 @@
+# Example systemd unit: one persistent shared.vim server for all local users,
+# started at boot, so the socket belongs to it before any user could take it.
+#
+# Needs a system-wide install (sudo gem install shared.vim): the service user
+# cannot read gems in home directories. Adapt ExecStart if `gem` puts the
+# executable elsewhere (see `gem environment`, EXECUTABLE DIRECTORY). Then:
+#
+#   sudo cp shared-vim.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now shared-vim
+#
+# Vims use /run/shared-vim/sock when it exists (else /tmp/shared-vim/sock).
+# Log: journalctl -u shared-vim. :SharedRestart stops the server, systemd
+# starts it again, with the newest installed gem version.
+
+[Unit]
+Description=shared.vim server (live co-editing for Vim)
+
+[Service]
+ExecStart=/usr/local/bin/shared-vim-server --persistent /run/shared-vim/sock
+# An unprivileged user of its own. It implies a private /tmp, hence /run.
+DynamicUser=yes
+RuntimeDirectory=shared-vim
+RuntimeDirectoryMode=0755
+Restart=always
+RestartSec=0.2
+
+[Install]
+WantedBy=multi-user.target

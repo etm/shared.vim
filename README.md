@@ -90,6 +90,18 @@ let g:shared_vim_socket = '/other/path/sock'  " max ~100 chars
 let g:shared_vim_max_size = 10000000          " bytes; bigger files are not shared
 ```
 
+With a socket of your own you get your own private, trusted circle:
+
+```vim
+let g:shared_vim_socket = '/home/user/.shared.vim.sock'
+```
+
+It is shared by whatever users can read/write there (e.g. group members), and
+by nobody else: connecting needs search permission on the directory, starting
+the server (when none runs) also write permission, since it creates the
+socket there. Everybody in the circle sets the same path. A Vim uses one
+socket, so all its files go to that server.
+
 ### systemd
 
 `contrib/shared-vim.service` is an example unit that runs one server for all
