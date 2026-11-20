@@ -12,7 +12,8 @@ or start.
 
 * A single Ruby server on the Unix socket `/tmp/shared-vim/sock`, shared by all
   local users. The first Vim that needs it starts it detached; it exits 60 s
-  after the last Vim has disconnected.
+  after the last Vim has disconnected. Or systemd runs it permanently, see
+  [systemd](#systemd).
 * Every real file buffer joins automatically. Names are `$USERNAME` (else
   `$USER`) + a number per user per file: `alice1`, `bob1`, `alice2` (same
   user twice is fine). Set `USERNAME` when several people share an account.
@@ -89,6 +90,28 @@ let g:shared_vim_socket = '/other/path/sock'  " max ~100 chars
 let g:shared_vim_max_size = 10000000          " bytes; bigger files are not shared
 ```
 
+### systemd
+
+`contrib/shared-vim.service` is an example unit that runs one server for all
+users permanently (`shared-vim-server --persistent`: no idle exit, no lock
+file, log to stderr, i.e. `journalctl -u shared-vim`). It runs as an
+unprivileged user of its own (`DynamicUser=yes`) on `/run/shared-vim/sock`;
+Vims use that socket when it exists, else `/tmp/shared-vim/sock`. Started at
+boot, it owns the socket before any user could put something else there. It
+needs a system-wide gem install, since the service user cannot read gems in
+home directories:
+
+```sh
+sudo gem install shared.vim
+sudo cp contrib/shared-vim.service /etc/systemd/system/   # adapt ExecStart if needed
+sudo systemctl daemon-reload
+sudo systemctl enable --now shared-vim
+```
+
+`:SharedRestart` still works: the server exits and systemd starts it again,
+with the newest installed version. Permission checks work as far as that
+user can see the files (not inside private home directories, see Limits).
+
 Commands:
 
 | command | |
@@ -103,6 +126,7 @@ Commands:
 |---|---|
 | `tools/shared-vim-server` | the server (`IO.select` loop, one JSON object per line) |
 | `tools/shared-vim-install` | installs the stub plugin that loads the gem |
+| `contrib/shared-vim.service` | example systemd unit for a permanent server |
 | `lib/shared_vim_core.rb` | line model, ops, transform, client state, undo stacks |
 | `lib/shared_vim.rb` | Vim side in Ruby: listener, buffer patching, colors, status |
 | `plugin/shared.vim` | autocmds, channel, mappings, swap/timestamp handling |
@@ -191,7 +215,17 @@ If you need editing over a network, or Neovim, one of these may fit better:
 * After undoing back to the saved text, the buffer still shows `[+]`.
 * Unsaved shared state lives only while somebody has the file open, and colors
   of unsaved text are lost when the server restarts.
-* No authentication: any local user can connect to the socket.
+* Permissions: the server only lets a user join a file they may read (or, if
+  it does not exist yet, create), judged by the uid of the connection and the
+  mode bits (ACLs are ignored). Where the server cannot tell (e.g. a private
+  home directory of another account than the server's), only the same user
+  as everybody already in it may join. Whoever joined may edit, also without
+  write permission: the edits reach the Vims of those who can save them.
+* The server itself has to be trusted. It runs as whoever started it first,
+  and a local user can put a program of their own on the socket instead,
+  which then sees every file any Vim opens. If you are afraid, or there are
+  users on your server that you don't trust, go the systemctl route (see
+  [systemd](#systemd)).
 * The size limit (`g:shared_vim_max_size`) is checked only by each Vim; the
   server accepts files of any size.
 * Edits that LSP plugins or other scripts make are shared like your own; text

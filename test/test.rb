@@ -228,4 +228,30 @@ raise "neighbour kept: #{doc(a.text).inspect}" unless doc(a.text) == "foo bar\n"
 raise 'xform' unless OT.xform_index([2, 'XY', 3], 3) == 5
 raise 'xform' unless OT.xform_index([1, -2, 2], 2) == 1
 
+# 7. file permissions of another user (nobody), from the mode bits
+require 'tmpdir'
+nobody = (Etc.getpwnam('nobody').uid rescue nil)
+if nobody && nobody != Process.uid
+  Dir.mktmpdir('shared-vim-test', '/tmp') do |dir|
+    File.chmod(0o755, dir)
+    f = File.join(dir, 'f')
+    File.write(f, 'x')
+    File.chmod(0o644, f)
+    raise 'access: readable for others' unless Access.allowed?(nobody, f)
+    File.chmod(0o600, f)
+    raise 'access: private file' if Access.allowed?(nobody, f)
+    raise 'access: own private file' unless Access.allowed?(Process.uid, f)
+    raise 'access: new file in foreign dir' if Access.allowed?(nobody, File.join(dir, 'new'))
+    File.chmod(0o777, dir)
+    raise 'access: new file in open dir' unless Access.allowed?(nobody, File.join(dir, 'new'))
+    File.chmod(0o644, f)
+    File.chmod(0o700, dir)
+    raise 'access: dir not searchable' if Access.allowed?(nobody, f)
+    File.chmod(0o200, f)
+    raise 'access: owner without read' if Access.allowed?(Process.uid, f)
+  end
+else
+  puts 'skipped permission test (no user nobody)'
+end
+
 puts 'test ok'

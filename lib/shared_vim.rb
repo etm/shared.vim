@@ -213,6 +213,11 @@ module SharedVim
       m = JSON.parse(u(line))
       b = @paths[m['path']] or return
       s = @bufs[b]
+      if m['t'] == 'denied'
+        @bufs.delete(b)
+        @paths.delete(s.path)
+        return VIM.message("shared.vim: #{File.basename(s.path)} not shared, no permission")
+      end
       case m['t']
       when 'joined' then joined(s, m)
       when 'ack'

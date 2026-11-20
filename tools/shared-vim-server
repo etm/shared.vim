@@ -15,10 +15,12 @@
 # <http://www.gnu.org/licenses/>.
 
 # shared.vim server: one process for all users, on a Unix domain socket.
-# Usage: shared-vim-server [socket]   (default /tmp/shared-vim/sock)
+# Usage: shared-vim-server [--persistent] [socket]   (default /tmp/shared-vim/sock)
 # Protocol: one JSON object per line, see README.md.
 # Ops not based on the current revision are rejected (nack); the client
-# transforms and resends them. Exits after IDLE seconds without connections.
+# transforms and resends them. Exits after IDLE seconds without connections,
+# unless --persistent: for a service manager (see contrib/shared-vim.service),
+# which also keeps it single and takes its log from stderr.
 
 require 'socket'
 require 'json'
@@ -26,6 +28,8 @@ require_relative '../lib/shared_vim_core'
 
 Text = SharedVimCore::Text
 OT = SharedVimCore::OT
+Access = SharedVimCore::Access
+PERSISTENT = !ARGV.delete('--persistent').nil?
 SOCK = ARGV[0] || '/tmp/shared-vim/sock'
 DIR = File.dirname(SOCK)
 
@@ -34,14 +38,18 @@ begin
   File.chmod(01777, DIR)
 rescue SystemCallError
 end
-lock = File.open(File.join(DIR, 'lock'), File::RDWR | File::CREAT, 0666)
-File.chmod(0666, lock.path) rescue nil
-exit 0 unless lock.flock(File::LOCK_EX | File::LOCK_NB)  # another server runs
-begin
-  $stderr.reopen(File.join(DIR, "server-#{Process.uid}.log"), 'a')
-  $stderr.sync = true
-rescue SystemCallError
+# The lock is open to everybody, so anybody could hold it: not used when a
+# service manager keeps the server single.
+unless PERSISTENT
+  lock = File.open(File.join(DIR, 'lock'), File::RDWR | File::CREAT, 0666)
+  File.chmod(0666, lock.path) rescue nil
+  exit 0 unless lock.flock(File::LOCK_EX | File::LOCK_NB)  # another server runs
+  begin
+    $stderr.reopen(File.join(DIR, "server-#{Process.uid}.log"), 'a')
+  rescue SystemCallError
+  end
 end
+$stderr.sync = true
 
 File.unlink(SOCK) if File.socket?(SOCK)
 SERVER = UNIXServer.new(SOCK)
@@ -55,6 +63,7 @@ Doc = Struct.new(:text, :rev, :members)
 IDLE = 60   # seconds without any connection before the server exits
 DOCS = {}   # path => Doc
 INBUF = {}  # io => String (binary)
+UIDS = {}   # io => uid of the connected user
 
 def log(msg) = $stderr.puts("#{Time.now.strftime('%F %T')} #{msg}")
 
@@ -84,6 +93,15 @@ def handle(io, m)
   case m['t']
   when 'join'
     return if me
+    # Only who may read the file (or create it) gets its text. If the server
+    # cannot tell, only the same user as everybody already in it.
+    uid = UIDS[io]
+    ok = Access.allowed?(uid, path)
+    ok = !d || d.members.all? { |x| UIDS[x.io] == uid } if ok.nil?
+    unless ok
+      log "denied #{path} for uid #{uid}"
+      return out(io, t: 'denied', path: path)
+    end
     created = d.nil?
     d = DOCS[path] ||= Doc.new(Text.new(m['lines']), 0, [])
     slots = d.members.map(&:slot)
@@ -126,12 +144,13 @@ end
 def drop(io)
   DOCS.keys.each { |p| leave(io, p) }
   INBUF.delete(io)
+  UIDS.delete(io)
   io.close rescue nil
 end
 
-log "listening on #{SOCK}"
+log "listening on #{SOCK}#{' (persistent)' if PERSISTENT}"
 loop do
-  ready, = IO.select([SERVER, *INBUF.keys], nil, nil, INBUF.empty? ? IDLE : nil)
+  ready, = IO.select([SERVER, *INBUF.keys], nil, nil, INBUF.empty? && !PERSISTENT ? IDLE : nil)
   unless ready
     # a Vim connecting right now sees its channel close and starts a new server
     File.unlink(SOCK) rescue nil
@@ -141,7 +160,10 @@ loop do
   ready.each do |io|
     if io == SERVER
       c = SERVER.accept_nonblock(exception: false)
-      INBUF[c] = ''.b if c.is_a?(UNIXSocket)
+      if c.is_a?(UNIXSocket)
+        INBUF[c] = ''.b
+        UIDS[c] = c.getpeereid[0]
+      end
       next
     end
     begin

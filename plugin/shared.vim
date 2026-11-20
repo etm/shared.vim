@@ -20,7 +20,9 @@ endif
 let g:loaded_shared_vim = 1
 
 let g:shared_vim_root = expand('<sfile>:p:h:h')
-let s:sock = get(g:, 'shared_vim_socket', '/tmp/shared-vim/sock')
+" /run/shared-vim/sock: a server run by systemd (contrib/shared-vim.service)
+let s:sock = get(g:, 'shared_vim_socket',
+      \ getftype('/run/shared-vim/sock') ==# 'socket' ? '/run/shared-vim/sock' : '/tmp/shared-vim/sock')
 let s:server = g:shared_vim_root . '/tools/shared-vim-server'
 let g:shared_vim_ch = v:none
 execute 'rubyfile ' . fnameescape(g:shared_vim_root . '/lib/shared_vim.rb')

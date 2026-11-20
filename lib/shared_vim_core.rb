@@ -23,6 +23,8 @@
 #   String       insert it
 # Positions are characters, not bytes; "\n" counts as one.
 
+require 'etc'
+
 module SharedVimCore
   module OT
     module_function
@@ -251,6 +253,47 @@ module SharedVimCore
       end
       out.pop if out.last && out.last[0].nil?
       out.empty? ? EMPTY : out
+    end
+  end
+
+  # File permissions of some user, as the server sees them: the mode bits of
+  # owner, group (incl. supplementary groups) and others. ACLs are ignored.
+  module Access
+    module_function
+
+    # May uid read path (an existing file) or create it (a new one)? Every
+    # directory on the way must be searchable. nil if this process cannot
+    # tell, e.g. a file in a private home directory of another account.
+    def allowed?(uid, path)
+      return true if uid == 0
+      dir = File.dirname(path)
+      dirs = [dir]
+      dirs << (dir = File.dirname(dir)) until dir == '/'
+      return false unless dirs.all? { |d| can?(uid, File.stat(d), 1) }
+      if File.exist?(path) then can?(uid, File.stat(path), 4)
+      else can?(uid, File.stat(File.dirname(path)), 3)
+      end
+    rescue SystemCallError
+      nil
+    end
+
+    # bits: 4 read, 2 write, 1 search. As in Unix, only the first class that
+    # applies counts: an owner without read permission may not read.
+    def can?(uid, st, bits)
+      shift = if st.uid == uid then 6
+              elsif groups(uid).include?(st.gid) then 3
+              else 0
+              end
+      (st.mode >> shift) & bits == bits
+    end
+
+    def groups(uid)
+      (@groups ||= {})[uid] ||= begin
+        pw = Etc.getpwuid(uid)
+        [pw.gid] + Etc.enum_for(:group).select { |g| g.mem.include?(pw.name) }.map(&:gid)
+      rescue ArgumentError
+        []
+      end
     end
   end
 
